@@ -1,0 +1,188 @@
+## Codebase Patterns
+- Desktop app is an Electron + React + Tailwind overlay window (420x700px, frameless, always-on-top)
+- Audio pipeline: Microphone → AudioWorklet (VAD + resampling 24kHz→16kHz) → PCM16 binary → WebSocket → Backend
+- Backend expects `speech.timing` messages for turn detection — without them, suggestions NEVER generate
+- Backend expects `speaker.update` messages for accurate transcript labeling
+- `session.start` MUST include `provider` field (groq/openai/anthropic/gemini) — omitting it defaults to `mock` which returns nothing
+- User API keys are stored in the web app (Settings page) and looked up server-side by user ID + provider
+- Speaker detection threshold must be 3x (mic energy > system energy * 3) to avoid bleed-through misclassification
+- Zustand store with localStorage persistence (`ia-desktop-auth`) handles auth state
+- Webpack bundles the renderer; tsc compiles the main process separately
+- Dev server runs on port 9000; Electron loads from it in dev mode
+
+---
+
+## 2026-03-04 - Desktop App MVP Sync with Web App
+
+### Problem
+AI suggestions were not appearing in the desktop app. Three root causes identified:
+
+1. **No `speech.timing` messages sent** — Backend's turn detection (Option B1 VAD-based) relies on periodic `speech.timing` messages from the frontend to know when a speaker's turn ends. Without these, the backend never triggers suggestion generation.
+2. **No `provider` in `session.start`** — The desktop sent `session.start` without a `provider` field, causing the backend to default to the `mock` LLM provider which returns no real suggestions.
+3. **Empty context** — Job description, resume, company name, role type, and round type were all empty strings, making any suggestions generic/useless.
+
+### Changes Made
+
+**`public/audio-worklet-processor.js`**
+- Fixed speaker detection threshold from `1x` to `3x` to match web app
+- Prevents mic bleed-through (interviewer audio picked up by mic) from being misclassified as user speech
+
+**`src/renderer/hooks/useAudioCapture.ts`**
+- Added `AudioChunkData` and `SpeechTimingData` interfaces
+- Added `onAudioChunkRef` callback — provides audio data with speaker and timing metadata
+- Added `onSpeechTimingRef` callback — provides periodic speech timing (isSpeaking, silenceDurationMs)
+- Both callbacks fire on every audio worklet message, enabling real-time forwarding to backend
+
+**`src/renderer/hooks/useWebSocket.ts`**
+- Added `SpeakerUpdateMessage` and `SpeechTimingMessage` types to `ClientMessage` union
+- Added `TranscriptEntry` interface and `transcripts` state array
+- Added handling for `transcript.delta` messages (update-or-add by entry ID)
+- Added handling for `connection.status`, `credits.warning`, `credits.exhausted`, `credits.force_end` messages
+- Added `sessionError` state for surfacing backend errors (API key missing, credits exhausted, etc.)
+- Exported `SessionContext` interface for use by Dashboard/Session
+
+**`src/renderer/components/Dashboard.tsx`**
+- Complete redesign from simple welcome screen to session setup form
+- Added inputs: Company name, Provider selector, Role type, Round type, Job description
+- Added collapsible "More options" section with Resume/Experience textarea
+- Created `SessionSettings` interface (context + provider + promptKey + verbosity)
+- `onStartSession` now receives full `SessionSettings` instead of no args
+- Compact layout optimized for 420px overlay width
+
+**`src/renderer/components/Session.tsx`**
+- Accepts `SessionSettings` prop from Dashboard (context, provider, promptKey, verbosity)
+- Sends `session.start` with full context, provider, and settings
+- Sends `speech.timing` messages to backend via `onSpeechTimingRef` callback on every audio chunk
+- Sends `speaker.update` messages when detected speaker changes
+- Added transcript view toggle (TXT button in top bar) — switches between suggestions and live transcript
+- Added live transcript bar showing latest transcript entry when not in transcript view
+- Added `FormattedResponse` component — renders `### headings`, `**bold**`, and `- bullet` lists inline without react-markdown dependency
+- Added `InlineBold` component for rendering `**bold**` segments
+- Improved suggestion card styling (emerald bullet points, tighter spacing, timestamps)
+- Shows suggestion count in top bar
+- Displays backend errors (API key missing, connection errors, credit exhaustion)
+
+**`src/renderer/App.tsx`**
+- Added `SessionSettings` state management
+- Dashboard now passes settings to App, which forwards them to Session
+- Default settings: groq provider, candidate prompt, concise verbosity
+
+**`src/renderer/stores/authStore.ts`**
+- Exported `User` interface (fixes pre-existing TS4058 error)
+
+### Quality Checks
+- TypeScript: `tsc --noEmit` passes for both renderer and main process
+- Webpack: Production build compiles successfully
+- No new dependencies added (markdown rendering done with custom lightweight components)
+
+---
+
+## Testing Instructions
+
+### Prerequisites
+1. Backend running at `http://localhost:8000` (cd backend && uvicorn main:app --reload)
+2. User account with API key configured via the web app (Dashboard → Settings → API Keys)
+   - Groq key recommended (fastest, free tier available)
+   - Or OpenAI/Anthropic/Gemini key
+3. Node.js and npm installed
+
+### Running the Desktop App
+```bash
+cd desktop
+npm install          # First time only
+npm run dev          # Starts webpack dev server + Electron
+```
+
+### Test: AI Suggestions Flow (Critical Path)
+1. Launch desktop app → Login with your credentials
+2. On Dashboard:
+   - Enter a company name (e.g., "Google")
+   - Select provider matching your configured API key (e.g., "Groq")
+   - Select role type and round type
+   - Paste a job description (even a short one helps)
+3. Click "Start Interview"
+4. Verify:
+   - Green status dot shows "connected"
+   - Mic level bar shows activity when speaking
+5. Speak a mock interview question aloud (e.g., "Tell me about yourself")
+6. Wait ~2 seconds of silence after speaking
+7. Expected: Purple "Generating..." card appears, then completes with formatted suggestion
+8. Speak another question → another suggestion should appear
+
+### Test: Transcript View
+1. During an active session, click "TXT" button in top bar
+2. Verify live transcript entries appear with speaker labels (You/Interviewer)
+3. Click "TXT" again to switch back to suggestions view
+4. Verify the live transcript bar at top shows latest entry
+
+### Test: Error Handling
+1. Start session with provider set to one you DON'T have a key for
+2. Expected: Error message "No API key found for [provider]" appears in red banner
+3. Start session without backend running
+4. Expected: "Failed to connect to server" error
+
+### Test: Window Controls
+1. Click "OVR" button → window should become semi-transparent overlay
+2. Click "WIN" button → window returns to normal mode
+3. Press Ctrl+Shift+I → window toggles visibility
+4. Minimize and close buttons work as expected
+
+### Test: Session Stop
+1. During active session, click "Stop"
+2. Verify: Returns to Dashboard, no errors in console
+
+---
+
+## Known Limitations (Current MVP)
+
+1. **Mic-only audio** — Desktop captures microphone only, not system/speaker audio. The web app captures both via screen share. This means the desktop can only hear what the user says, not the interviewer (unless interviewer audio is picked up by the mic).
+2. **No Google OAuth** — Desktop only supports email/password login, no Google sign-in.
+3. **No signup flow** — Users must create accounts via the web app first.
+4. **No password reset** — Must use web app for forgot password flow.
+5. **API keys configured via web app only** — No settings page in desktop to add/manage API keys.
+6. **No credit balance display** — Credits are deducted server-side but desktop doesn't show remaining balance.
+7. **No interview prep wizard** — Web app has a 2-step prep flow with pre-generated Q&A; desktop has basic context input only.
+8. **No session history** — Sessions are saved to DB server-side but desktop has no way to view past sessions.
+9. **No spoken-word greying** — Web app greys out words the user has already spoken from the suggestion; desktop doesn't.
+10. **No overlay pop-out** — Web app can pop out suggestions into a separate overlay window; desktop IS the overlay.
+11. **Hardcoded backend URL** — Currently points to localhost:8000; needs env var for production deployment.
+
+---
+
+## Planned Improvements (Future Sessions)
+
+### High Priority
+- [ ] **System audio capture via Electron desktopCapturer** — Use Electron's desktopCapturer API to capture system/speaker audio. This enables hearing the interviewer's questions directly (not relying on mic bleed). Critical for accurate turn detection and transcript labeling.
+- [ ] **Settings page** — Add API key management (add/view/delete keys for each provider) directly in the desktop app, eliminating web app dependency.
+- [ ] **Production backend URL** — Configure via environment variable or settings; currently hardcoded to localhost.
+- [ ] **Credit balance display** — Show remaining credit minutes in the Dashboard or Session view. Handle credits.warning and credits.exhausted with user-visible alerts.
+- [ ] **Google OAuth support** — Add Google sign-in button to Login page (requires handling OAuth redirect in Electron).
+
+### Medium Priority
+- [ ] **Interview prep integration** — Port the web app's 2-step prep wizard (role-based question generation, Q&A preparation, pre-loaded answers sent to backend).
+- [ ] **Signup flow** — Allow new users to register directly from the desktop app.
+- [ ] **Password reset flow** — Add "Forgot password?" link that opens the web app's reset page or handles it in-app.
+- [ ] **Session history view** — Show list of past sessions with transcripts and suggestions (fetch from /api/sessions endpoint).
+- [ ] **Spoken-word greying** — Port the web app's `spokenWordMatcher` to grey out already-spoken words in suggestions.
+- [ ] **Auto-update mechanism** — Use electron-updater for automatic app updates.
+- [ ] **Verbosity selector** — Add mid-session verbosity change (concise/moderate/detailed).
+- [ ] **Resizable suggestion panel** — Allow users to resize the overlay window and adjust suggestion display density.
+
+### Low Priority / Polish
+- [ ] **Tray icon** — Minimize to system tray instead of taskbar.
+- [ ] **Keyboard shortcuts** — Add shortcuts for stop session, toggle transcript, clear suggestions.
+- [ ] **Sound notifications** — Play subtle sound when new suggestion arrives (useful when window is in overlay/background).
+- [ ] **Dark/light theme toggle** — Currently dark-only; some users may prefer light mode.
+- [ ] **Font size control** — Allow users to increase/decrease suggestion text size for readability.
+- [ ] **Export session** — Export transcript + suggestions as PDF/markdown for post-interview review.
+- [ ] **Multi-monitor support** — Remember which monitor the overlay was on; use getDisplays() API already in preload.
+- [ ] **Connection resilience** — Auto-reconnect WebSocket on disconnect with exponential backoff.
+- [ ] **Offline detection** — Show clear offline state when network is unavailable.
+
+### Screen Share Hiding (Core Desktop Advantage)
+- [ ] **Verify screen-share invisibility** — Test that the Electron overlay window is NOT captured by screen-sharing apps (Zoom, Google Meet, Teams). This is the desktop app's primary selling point.
+- [ ] **Platform-specific testing** — Windows 11 may have different screen capture behavior than Windows 10 or macOS. Test on all target platforms.
+- [ ] **setContentProtection API** — Investigate Electron's `win.setContentProtection(true)` for preventing screen capture of the window contents.
+- [ ] **Fallback strategies** — If screen-share hiding doesn't work on certain platforms, document workarounds (e.g., running on a second monitor not shared, using virtual desktop).
+
+---
