@@ -3,7 +3,7 @@ import { useAuthStore } from '../stores/authStore'
 
 const API_BASE =
   (typeof process !== 'undefined' && process.env?.REACT_APP_API_URL) ||
-  'https://interviewassistantbackend-production.up.railway.app'
+  'https://interviewassistant-backend-production.up.railway.app'
 
 interface AuthResponse {
   access_token: string
