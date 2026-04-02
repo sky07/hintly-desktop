@@ -325,11 +325,13 @@ class AudioMergerProcessor extends AudioWorkletProcessor {
     } else if (this.systemAudioMode) {
       // SYSTEM AUDIO MODE: Always send audio chunks (backend needs continuous data),
       // but VAD still tracks isSpeaking/silence for turn detection timing.
+      // Use smaller chunks (0.5s) for lower latency instead of the default 2s.
       const resampled = this.resample(mixed)
+      const systemChunkSamples = this.outputSampleRate * 0.5  // 8000 samples = 0.5s
       for (let i = 0; i < resampled.length; i++) {
         this.buffer[this.bufferIndex++] = resampled[i]
-        if (this.bufferIndex >= this.chunkSamples) {
-          this.sendChunk(true)
+        if (this.bufferIndex >= systemChunkSamples) {
+          this.sendChunk(false)  // No overlap needed for small chunks
         }
       }
     } else if (this.isSpeaking || speechDetected) {

@@ -62,12 +62,23 @@ export default function Session({ settings, onEnd }: SessionProps) {
   })
 
   // Speech timing handler — forward to backend for turn detection
+  // Throttle to every 300ms to avoid flooding the WebSocket
+  const lastTimingSentRef = useRef(0)
+  const lastIsSpeakingRef = useRef(true)
   const onSpeechTimingRef = useRef<(timing: SpeechTimingData) => void>((timing) => {
-    sendMessageRef.current({
-      type: 'speech.timing',
-      isSpeaking: timing.isSpeaking,
-      silenceDurationMs: timing.silenceDurationMs,
-    })
+    const now = Date.now()
+    const stateChanged = timing.isSpeaking !== lastIsSpeakingRef.current
+    // Send immediately on state change (speech→silence or silence→speech),
+    // otherwise throttle to every 300ms
+    if (stateChanged || now - lastTimingSentRef.current >= 300) {
+      lastTimingSentRef.current = now
+      lastIsSpeakingRef.current = timing.isSpeaking
+      sendMessageRef.current({
+        type: 'speech.timing',
+        isSpeaking: timing.isSpeaking,
+        silenceDurationMs: timing.silenceDurationMs,
+      })
+    }
   })
 
   const { startCapture, stopCapture, setStreamingMode, isCapturing, micLevel, error: audioError } =

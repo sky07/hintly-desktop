@@ -185,6 +185,9 @@ export function useAudioCapture(
             isSpeaking: msg.isSpeaking ?? true,
             silenceDurationMs: msg.silenceDurationMs ?? 0,
           })
+        } else if (msg.type === 'speechTiming') {
+          // Forward real-time speech timing from worklet (every ~500ms)
+          // so the backend gets timely silence notifications for turn detection
           onSpeechTimingRef?.current?.({
             isSpeaking: msg.isSpeaking ?? true,
             silenceDurationMs: msg.silenceDurationMs ?? 0,
