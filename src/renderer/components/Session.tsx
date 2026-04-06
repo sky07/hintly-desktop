@@ -5,6 +5,7 @@ import { useWebSocket, Suggestion } from '../hooks/useWebSocket'
 import { useAudioCapture, AudioChunkData, SpeechTimingData } from '../hooks/useAudioCapture'
 import { SessionSettings } from './Dashboard'
 import { useOverlay } from '../App'
+import { useAuth } from '../hooks/useAuth'
 
 interface SessionProps {
   settings: SessionSettings
@@ -28,6 +29,7 @@ export default function Session({ settings, onEnd }: SessionProps) {
   } = useWebSocket()
 
   const { isOverlay } = useOverlay()
+  const { isAuthenticated, fetchWithAuth } = useAuth()
   const [suggestionsMuted, setSuggestionsMuted] = useState(false)
 
   // Track current speaker for speaker.update messages
@@ -96,6 +98,26 @@ export default function Session({ settings, onEnd }: SessionProps) {
   const handleStart = useCallback(async () => {
     setLocalError(null)
 
+    // Auto-load prep answers from backend if user is authenticated and roleType is set
+    let preparedAnswers: string | undefined
+    const roleType = settings.context.roleType
+    if (roleType && isAuthenticated) {
+      try {
+        const res = await fetchWithAuth(
+          `/api/interview-prep/load-for-session?role_type=${encodeURIComponent(roleType)}`
+        )
+        if (res.ok) {
+          const data = await res.json()
+          if (data.prompt_injection) {
+            preparedAnswers = data.prompt_injection
+            console.log(`[Session] Loaded prep answers: ${preparedAnswers!.length} chars`)
+          }
+        }
+      } catch (err) {
+        console.warn('[Session] Failed to auto-load prep answers:', err)
+      }
+    }
+
     try {
       await connect()
     } catch (err) {
@@ -110,6 +132,7 @@ export default function Session({ settings, onEnd }: SessionProps) {
       verbosity: settings.verbosity,
       provider: settings.provider,
       promptKey: settings.promptKey,
+      preparedAnswers,
     })
 
     try {
@@ -127,7 +150,7 @@ export default function Session({ settings, onEnd }: SessionProps) {
     if (sttMode === 'streaming') {
       setStreamingMode(true)
     }
-  }, [connect, sendMessage, startCapture, setStreamingMode, sttMode, settings])
+  }, [connect, sendMessage, startCapture, setStreamingMode, sttMode, settings, isAuthenticated, fetchWithAuth])
 
   const handleStop = () => {
     sendMessage({ type: 'session.end' })

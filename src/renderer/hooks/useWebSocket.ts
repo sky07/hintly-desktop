@@ -40,6 +40,7 @@ interface SessionStartMessage {
   verbosity: 'concise' | 'moderate' | 'detailed'
   provider?: string
   promptKey?: string
+  preparedAnswers?: string
 }
 
 interface SessionEndMessage {
