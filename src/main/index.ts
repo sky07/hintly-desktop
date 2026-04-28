@@ -82,6 +82,22 @@ async function createWindow() {
       mainWindow.focus()
     }
   })
+
+  // Register Ctrl+Shift+V to toggle quick-paste input
+  globalShortcut.register('Ctrl+Shift+V', () => {
+    if (!mainWindow) return
+    mainWindow.webContents.send('toggle-quick-input')
+    if (!mainWindow.isVisible()) {
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+
+  // Register Ctrl+Shift+Q to trigger screen capture
+  globalShortcut.register('Ctrl+Shift+Q', () => {
+    if (!mainWindow) return
+    mainWindow.webContents.send('trigger-screen-capture')
+  })
 }
 
 // Single instance lock
@@ -180,4 +196,21 @@ ipcMain.handle('get-desktop-sources', async () => {
   const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] })
   // Only return serializable data (thumbnails are NativeImage, not serializable)
   return sources.map((s) => ({ id: s.id, name: s.name }))
+})
+
+ipcMain.handle('capture-screen', async () => {
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1280, height: 720 },
+    })
+    if (sources.length > 0) {
+      // Return base64 PNG of the primary screen (resized to 1280x720 for cost/speed)
+      return sources[0].thumbnail.toPNG().toString('base64')
+    }
+    return null
+  } catch (err) {
+    console.error('Screen capture failed:', err)
+    return null
+  }
 })

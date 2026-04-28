@@ -1,9 +1,6 @@
 import { useCallback, useRef, useEffect, useState } from 'react'
 import { useAuthStore } from '../stores/authStore'
-
-const WS_URL =
-  (typeof process !== 'undefined' && process.env?.REACT_APP_WS_URL) ||
-  'wss://interviewassistant-backend-production.up.railway.app/ws'
+import { WS_URL } from '../config'
 
 export interface Suggestion {
   id: string
@@ -68,6 +65,13 @@ interface SuggestionsToggleMessage {
   enabled: boolean
 }
 
+interface ScreenContextMessage {
+  type: 'screen.context'
+  text?: string
+  image?: string  // base64 PNG for screenshot
+  source: 'paste' | 'screenshot' | 'clipboard'
+}
+
 type ClientMessage =
   | SessionStartMessage
   | SessionEndMessage
@@ -75,6 +79,7 @@ type ClientMessage =
   | SpeakerUpdateMessage
   | SpeechTimingMessage
   | SuggestionsToggleMessage
+  | ScreenContextMessage
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)

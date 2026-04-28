@@ -31,6 +31,11 @@ export default function Session({ settings, onEnd }: SessionProps) {
   const { isOverlay } = useOverlay()
   const { isAuthenticated, fetchWithAuth } = useAuth()
   const [suggestionsMuted, setSuggestionsMuted] = useState(false)
+  const [showQuickInput, setShowQuickInput] = useState(false)
+  const [quickInputText, setQuickInputText] = useState('')
+  const [quickInputSent, setQuickInputSent] = useState(false)
+  const [isCapturingScreen, setIsCapturingScreen] = useState(false)
+  const quickInputRef = useRef<HTMLTextAreaElement>(null)
 
   // Track current speaker for speaker.update messages
   const currentSpeakerRef = useRef<'user' | 'interviewer'>('interviewer')
@@ -166,6 +171,57 @@ export default function Session({ settings, onEnd }: SessionProps) {
     toggleSuggestions(!newMuted) // backend: enabled=true means NOT muted
   }
 
+  const handleQuickInputSubmit = () => {
+    const text = quickInputText.trim()
+    if (!text) return
+    sendMessage({ type: 'screen.context', text, source: 'paste' })
+    setQuickInputText('')
+    setShowQuickInput(false)
+    setQuickInputSent(true)
+    setTimeout(() => setQuickInputSent(false), 2000)
+  }
+
+  const handleToggleQuickInput = useCallback(() => {
+    setShowQuickInput((prev) => {
+      if (!prev) {
+        // Focus textarea when opening
+        setTimeout(() => quickInputRef.current?.focus(), 50)
+      }
+      return !prev
+    })
+  }, [])
+
+  const handleScreenCapture = useCallback(async () => {
+    if (isCapturingScreen) return
+    const api = (window as any).electronAPI
+    if (!api?.captureScreen) return
+
+    setIsCapturingScreen(true)
+    try {
+      const base64png = await api.captureScreen()
+      if (base64png) {
+        sendMessage({ type: 'screen.context', image: base64png, source: 'screenshot' })
+      }
+    } catch (err) {
+      console.error('[Session] Screen capture failed:', err)
+    } finally {
+      setIsCapturingScreen(false)
+    }
+  }, [isCapturingScreen, sendMessage])
+
+  // Listen for hotkey IPC events from main process
+  useEffect(() => {
+    const api = (window as any).electronAPI
+    if (api?.onToggleQuickInput) {
+      const cleanup1 = api.onToggleQuickInput(() => handleToggleQuickInput())
+      const cleanup2 = api?.onTriggerScreenCapture?.(() => handleScreenCapture())
+      return () => {
+        cleanup1?.()
+        cleanup2?.()
+      }
+    }
+  }, [handleToggleQuickInput, handleScreenCapture])
+
   // Start session on mount
   useEffect(() => {
     let cancelled = false
@@ -223,6 +279,31 @@ export default function Session({ settings, onEnd }: SessionProps) {
           >
             {suggestionsMuted ? 'AI OFF' : 'AI ON'}
           </button>
+          {/* Quick-paste input toggle */}
+          <button
+            onClick={handleToggleQuickInput}
+            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+              showQuickInput
+                ? 'bg-cyan-600/30 text-cyan-300'
+                : 'bg-gray-700/50 text-gray-400 hover:text-gray-300'
+            }`}
+            title="Paste a question (Ctrl+Shift+V)"
+          >
+            Q
+          </button>
+          {/* Screenshot capture */}
+          <button
+            onClick={handleScreenCapture}
+            disabled={isCapturingScreen}
+            className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+              isCapturingScreen
+                ? 'bg-purple-600/30 text-purple-300 animate-pulse'
+                : 'bg-gray-700/50 text-gray-400 hover:text-gray-300'
+            }`}
+            title="Capture screen (Ctrl+Shift+Q)"
+          >
+            {isCapturingScreen ? '...' : 'CAP'}
+          </button>
           {/* Toggle transcript view */}
           <button
             onClick={() => setShowTranscript(!showTranscript)}
@@ -243,6 +324,56 @@ export default function Session({ settings, onEnd }: SessionProps) {
           </button>
         </div>
       </div>
+
+      {/* Quick-paste input panel */}
+      {showQuickInput && (
+        <div
+          className="px-3 py-2 border-b border-cyan-800/30"
+          style={{ backgroundColor: isOverlay ? 'rgba(8, 51, 68, 0.4)' : '#0a2a3a' }}
+        >
+          <textarea
+            ref={quickInputRef}
+            value={quickInputText}
+            onChange={(e) => setQuickInputText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                handleQuickInputSubmit()
+              }
+              if (e.key === 'Escape') {
+                setShowQuickInput(false)
+              }
+            }}
+            placeholder="Paste the question here... (Enter to send, Esc to close)"
+            className="w-full bg-gray-900/60 border border-gray-700/50 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-500 resize-none focus:outline-none focus:border-cyan-600/50"
+            rows={3}
+          />
+          <div className="flex items-center justify-between mt-1.5">
+            <span className="text-[9px] text-gray-600">Shift+Enter for new line</span>
+            <button
+              onClick={handleQuickInputSubmit}
+              disabled={!quickInputText.trim()}
+              className="px-3 py-0.5 rounded text-[10px] font-medium bg-cyan-600/30 text-cyan-300 hover:bg-cyan-600/40 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              Send
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Sent confirmation */}
+      {quickInputSent && (
+        <div className="px-3 py-1 bg-green-900/20 border-b border-green-800/30">
+          <p className="text-[10px] text-green-400 text-center">Question sent to AI</p>
+        </div>
+      )}
+
+      {/* Screen capture status */}
+      {isCapturingScreen && (
+        <div className="px-3 py-1 bg-purple-900/20 border-b border-purple-800/30">
+          <p className="text-[10px] text-purple-400 text-center animate-pulse">Reading screen...</p>
+        </div>
+      )}
 
       {/* Error display */}
       {displayError && (
