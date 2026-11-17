@@ -25,6 +25,8 @@ export default function Session({ settings, onEnd }: SessionProps) {
     transcripts,
     sttMode,
     sessionError,
+    creditsRemaining,
+    creditNotice,
     clearSuggestions,
   } = useWebSocket()
 
@@ -243,11 +245,20 @@ export default function Session({ settings, onEnd }: SessionProps) {
   const statusColor =
     status === 'connected'
       ? 'bg-green-500'
-      : status === 'connecting'
+      : status === 'connecting' || status === 'reconnecting'
       ? 'bg-yellow-500 animate-pulse'
       : 'bg-red-500'
 
   const micBarWidth = Math.min(micLevel * 500, 100)
+  const creditMinutes = creditsRemaining === null ? null : Math.max(0, Math.floor(creditsRemaining / 60))
+  const creditColor =
+    creditsRemaining === null
+      ? ''
+      : creditsRemaining <= 60
+      ? 'text-red-400'
+      : creditsRemaining <= 300
+      ? 'text-amber-400'
+      : 'text-gray-500'
   const latestTranscript = transcripts.length > 0 ? transcripts[transcripts.length - 1] : null
 
   return (
@@ -263,6 +274,11 @@ export default function Session({ settings, onEnd }: SessionProps) {
           {suggestions.length > 0 && (
             <span className="text-[10px] text-gray-600">
               {suggestions.length} suggestion{suggestions.length !== 1 ? 's' : ''}
+            </span>
+          )}
+          {creditMinutes !== null && (
+            <span className={`text-[10px] ${creditColor}`} title="Interview credit left">
+              {creditMinutes} min left
             </span>
           )}
         </div>
@@ -372,6 +388,24 @@ export default function Session({ settings, onEnd }: SessionProps) {
       {isCapturingScreen && (
         <div className="px-3 py-1 bg-purple-900/20 border-b border-purple-800/30">
           <p className="text-[10px] text-purple-400 text-center animate-pulse">Reading screen...</p>
+        </div>
+      )}
+
+      {/* Connection lost, retrying */}
+      {status === 'reconnecting' && (
+        <div className="px-3 py-1 bg-yellow-900/20 border-b border-yellow-800/30">
+          <p className="text-[10px] text-yellow-300 text-center animate-pulse">
+            Connection lost. Reconnecting...
+          </p>
+        </div>
+      )}
+
+      {/* Low or exhausted credit */}
+      {creditNotice && (
+        <div className="px-3 py-1.5 bg-amber-900/20 border-b border-amber-800/30">
+          <p className="text-[10px] text-amber-300">
+            {creditNotice} Top up at <span className="select-all">hintly.tech/dashboard/credits</span>
+          </p>
         </div>
       )}
 

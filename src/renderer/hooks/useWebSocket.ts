@@ -20,7 +20,10 @@ export interface TranscriptEntry {
   timestamp: Date
 }
 
-type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'error'
+type ConnectionStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
+
+// Wait this long before each reconnect attempt after the connection drops.
+const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000, 30000]
 
 export interface SessionContext {
   jobDescription: string
@@ -91,6 +94,17 @@ export function useWebSocket() {
   const [sttMode, setSttMode] = useState<'chunked' | 'streaming'>('chunked')
   const [sessionError, setSessionError] = useState<string | null>(null)
   const suggestionsMutedRef = useRef(false)
+  // Credit left in this session, as last reported by the server (null until the first report)
+  const [creditsRemaining, setCreditsRemaining] = useState<number | null>(null)
+  const [creditNotice, setCreditNotice] = useState<string | null>(null)
+
+  // Reconnect bookkeeping
+  const lastStartRef = useRef<SessionStartMessage | null>(null)
+  const intentionalCloseRef = useRef(false)
+  const noReconnectRef = useRef(false)
+  const reconnectAttemptRef = useRef(0)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const connectRef = useRef<() => Promise<void>>(() => Promise.resolve())
 
   const handleMessage = useCallback((event: MessageEvent) => {
     try {
@@ -102,6 +116,7 @@ export function useWebSocket() {
       switch (message.type) {
         case 'session.ready':
           setStatus('connected')
+          reconnectAttemptRef.current = 0
           if (message.sttMode) setSttMode(message.sttMode)
           break
 
@@ -175,25 +190,75 @@ export function useWebSocket() {
         case 'pong':
           break
 
+        case 'credits.update':
+          if (typeof message.remaining_seconds === 'number') {
+            setCreditsRemaining(message.remaining_seconds)
+          }
+          break
+
         case 'credits.warning':
+          if (typeof message.remaining_seconds === 'number') {
+            setCreditsRemaining(message.remaining_seconds)
+          }
+          setCreditNotice(message.message)
+          break
+
         case 'credits.exhausted':
-          console.warn('[WS] Credit warning:', message.message)
+          setCreditsRemaining(0)
+          setCreditNotice(message.message)
           break
 
         case 'credits.force_end':
           console.warn('[WS] Session force-ended:', message.message)
+          noReconnectRef.current = true
+          setCreditsRemaining(0)
+          setCreditNotice(null)
           setSessionError(message.message)
           break
 
         case 'error':
           console.error('Server error:', message.code, message.message)
           setSessionError(message.message)
-          if (!message.recoverable) setStatus('error')
+          if (!message.recoverable) {
+            noReconnectRef.current = true
+            setStatus('error')
+          }
           break
       }
     } catch (error) {
       console.error('Error parsing message:', error)
     }
+  }, [])
+
+  // After an unexpected drop: wait, reconnect, and start the session again
+  // with the same settings. The server has no resume, so it begins a fresh
+  // session; audio capture keeps running on this side throughout.
+  const scheduleReconnect = useCallback(() => {
+    const attempt = reconnectAttemptRef.current
+    if (attempt >= RECONNECT_DELAYS_MS.length) {
+      setStatus('error')
+      setSessionError('Connection lost. Stop and start the session again.')
+      return
+    }
+    reconnectAttemptRef.current = attempt + 1
+    setStatus('reconnecting')
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null
+      if (intentionalCloseRef.current || noReconnectRef.current) return
+      connectRef.current()
+        .then(() => {
+          const start = lastStartRef.current
+          if (start && wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify(start))
+            if (suggestionsMutedRef.current) {
+              wsRef.current.send(JSON.stringify({ type: 'suggestions.toggle', enabled: false }))
+            }
+          }
+        })
+        .catch(() => {
+          if (!intentionalCloseRef.current && !noReconnectRef.current) scheduleReconnect()
+        })
+    }, RECONNECT_DELAYS_MS[attempt])
   }, [])
 
   const connect = useCallback((): Promise<void> => {
@@ -203,13 +268,21 @@ export function useWebSocket() {
         return
       }
 
-      setStatus('connecting')
+      const isReconnect = reconnectAttemptRef.current > 0
+      intentionalCloseRef.current = false
+      if (!isReconnect) {
+        noReconnectRef.current = false
+        setStatus('connecting')
+      }
       setSessionError(null)
       const token = useAuthStore.getState().token
       const wsUrl = token ? `${WS_URL}?token=${encodeURIComponent(token)}` : WS_URL
       console.log('[WS] Connecting to:', wsUrl)
 
       let settled = false
+      let opened = false
+      // While retrying, failures stay quiet: the status reads 'reconnecting'
+      const failStatus = () => { if (!isReconnect) setStatus('error') }
       const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
@@ -217,7 +290,7 @@ export function useWebSocket() {
         if (!settled) {
           settled = true
           ws.close()
-          setStatus('error')
+          failStatus()
           reject(new Error('WebSocket connection timeout'))
         }
       }, 10000)
@@ -226,6 +299,7 @@ export function useWebSocket() {
         clearTimeout(timeout)
         if (!settled) {
           settled = true
+          opened = true
           console.log('[WS] Connected successfully')
           pingIntervalRef.current = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
@@ -247,8 +321,18 @@ export function useWebSocket() {
         }
         if (!settled) {
           settled = true
-          setStatus('error')
+          failStatus()
           reject(new Error(`WebSocket closed (code: ${event.code})`))
+        } else if (!opened) {
+          // Never connected: the failure was already reported above
+        } else if (
+          wsRef.current === ws &&
+          !intentionalCloseRef.current &&
+          !noReconnectRef.current &&
+          lastStartRef.current
+        ) {
+          // Dropped mid-session: try to get back
+          scheduleReconnect()
         } else {
           setStatus('idle')
         }
@@ -259,14 +343,22 @@ export function useWebSocket() {
         console.error('[WS] Error — could not connect to', wsUrl)
         if (!settled) {
           settled = true
-          setStatus('error')
+          failStatus()
           reject(new Error(`WebSocket failed to connect to ${WS_URL}`))
         }
       }
     })
-  }, [handleMessage])
+  }, [handleMessage, scheduleReconnect])
+  connectRef.current = connect
 
   const disconnect = useCallback(() => {
+    intentionalCloseRef.current = true
+    lastStartRef.current = null
+    reconnectAttemptRef.current = 0
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
     if (pingIntervalRef.current) {
       clearInterval(pingIntervalRef.current)
       pingIntervalRef.current = null
@@ -279,6 +371,7 @@ export function useWebSocket() {
   }, [])
 
   const sendMessage = useCallback((message: ClientMessage) => {
+    if (message.type === 'session.start') lastStartRef.current = message
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(message))
     }
@@ -300,6 +393,8 @@ export function useWebSocket() {
     setStreamingSuggestion(null)
     setTranscripts([])
     setSessionError(null)
+    setCreditsRemaining(null)
+    setCreditNotice(null)
   }, [])
 
   useEffect(() => {
@@ -318,6 +413,8 @@ export function useWebSocket() {
     transcripts,
     sttMode,
     sessionError,
+    creditsRemaining,
+    creditNotice,
     clearSuggestions,
   }
 }

@@ -1,5 +1,6 @@
-import React, { useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { useAuthStore } from '../stores/authStore'
+import { useAuth } from '../hooks/useAuth'
 import { SessionContext } from '../hooks/useWebSocket'
 
 export interface SessionSettings {
@@ -14,18 +15,47 @@ interface DashboardProps {
   onLogout: () => void
 }
 
+// The model is chosen on the server; the desktop app always asks for it.
+const PROVIDER = 'anthropic'
+// A session needs at least one minute of credit to start.
+const MIN_START_SECONDS = 60
+const CREDITS_URL = 'hintly.tech/dashboard/credits'
+
 export default function Dashboard({ onStartSession, onLogout }: DashboardProps) {
   const user = useAuthStore((s) => s.user)
+  const { fetchWithAuth } = useAuth()
 
   const [jobDescription, setJobDescription] = useState('')
   const [resume, setResume] = useState('')
   const [companyName, setCompanyName] = useState('')
   const [roleType, setRoleType] = useState('software_engineer')
   const [roundType, setRoundType] = useState('behavioral')
-  const [provider, setProvider] = useState('groq')
   const [showAdvanced, setShowAdvanced] = useState(false)
 
+  // null = not loaded yet (or the check failed; the server still enforces credits)
+  const [creditSeconds, setCreditSeconds] = useState<number | null>(null)
+
+  const loadBalance = useCallback(async () => {
+    try {
+      const res = await fetchWithAuth('/api/credits/balance')
+      if (!res.ok) return
+      const data = await res.json()
+      setCreditSeconds(data.total_platform_seconds ?? 0)
+    } catch (err) {
+      console.warn('[Dashboard] Could not load credit balance:', err)
+    }
+  }, [fetchWithAuth])
+
+  useEffect(() => {
+    loadBalance()
+  }, [loadBalance])
+
+  const creditMinutes = creditSeconds === null ? null : Math.floor(creditSeconds / 60)
+  const outOfCredits = creditSeconds !== null && creditSeconds < MIN_START_SECONDS
+  const lowCredits = creditSeconds !== null && !outOfCredits && creditSeconds <= 300
+
   const handleStart = () => {
+    if (outOfCredits) return
     onStartSession({
       context: {
         jobDescription,
@@ -35,7 +65,7 @@ export default function Dashboard({ onStartSession, onLogout }: DashboardProps) 
         roleType,
         roundType,
       },
-      provider,
+      provider: PROVIDER,
       promptKey: 'personalized',
       verbosity: 'concise',
     })
@@ -52,43 +82,36 @@ export default function Dashboard({ onStartSession, onLogout }: DashboardProps) 
             </h2>
             <p className="text-[10px] text-gray-500">{user?.email}</p>
           </div>
-          <button
-            onClick={onLogout}
-            className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors"
-          >
-            Sign out
-          </button>
+          <div className="text-right">
+            <p
+              className={`text-[11px] font-medium ${
+                outOfCredits ? 'text-red-400' : lowCredits ? 'text-amber-400' : 'text-emerald-400'
+              }`}
+            >
+              {creditMinutes === null ? '' : `${creditMinutes} min left`}
+            </p>
+            <button
+              onClick={onLogout}
+              className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors"
+            >
+              Sign out
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Setup Form */}
       <div className="flex-1 px-4 pb-4 space-y-3">
-        {/* Company & Role row */}
-        <div className="grid grid-cols-2 gap-2">
-          <div>
-            <label className="block text-[10px] text-gray-400 mb-1 uppercase tracking-wider">Company</label>
-            <input
-              type="text"
-              value={companyName}
-              onChange={(e) => setCompanyName(e.target.value)}
-              className="w-full px-2.5 py-1.5 bg-[#0f0f23] border border-gray-700/50 rounded-md text-xs text-gray-100 focus:outline-none focus:border-purple-500/50 transition-colors placeholder:text-gray-600"
-              placeholder="e.g. Google"
-            />
-          </div>
-          <div>
-            <label className="block text-[10px] text-gray-400 mb-1 uppercase tracking-wider">Provider</label>
-            <select
-              value={provider}
-              onChange={(e) => setProvider(e.target.value)}
-              className="w-full px-2.5 py-1.5 bg-[#0f0f23] border border-gray-700/50 rounded-md text-xs text-gray-100 focus:outline-none focus:border-purple-500/50 transition-colors"
-            >
-              <option value="groq">Groq</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="gemini">Gemini</option>
-              <option value="adaptive">Adaptive</option>
-            </select>
-          </div>
+        {/* Company */}
+        <div>
+          <label className="block text-[10px] text-gray-400 mb-1 uppercase tracking-wider">Company</label>
+          <input
+            type="text"
+            value={companyName}
+            onChange={(e) => setCompanyName(e.target.value)}
+            className="w-full px-2.5 py-1.5 bg-[#0f0f23] border border-gray-700/50 rounded-md text-xs text-gray-100 focus:outline-none focus:border-purple-500/50 transition-colors placeholder:text-gray-600"
+            placeholder="e.g. Google"
+          />
         </div>
 
         {/* Role type & Round type row */}
@@ -164,10 +187,30 @@ export default function Dashboard({ onStartSession, onLogout }: DashboardProps) 
           </div>
         )}
 
+        {/* Credit notices */}
+        {outOfCredits && (
+          <div className="px-2.5 py-2 bg-red-900/20 border border-red-800/40 rounded-md">
+            <p className="text-[11px] text-red-300">
+              You have no interview credits left. Buy more at{' '}
+              <span className="select-all text-red-200">{CREDITS_URL}</span>, then{' '}
+              <button onClick={loadBalance} className="underline hover:text-red-100">check again</button>.
+            </p>
+          </div>
+        )}
+        {lowCredits && (
+          <div className="px-2.5 py-2 bg-amber-900/20 border border-amber-800/40 rounded-md">
+            <p className="text-[11px] text-amber-300">
+              Only {creditMinutes} min of credit left. Top up at{' '}
+              <span className="select-all text-amber-200">{CREDITS_URL}</span> before a long interview.
+            </p>
+          </div>
+        )}
+
         {/* Start button */}
         <button
           onClick={handleStart}
-          className="w-full py-2.5 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm font-medium transition-colors shadow-lg shadow-purple-600/20"
+          disabled={outOfCredits}
+          className="w-full py-2.5 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 disabled:shadow-none rounded-lg text-sm font-medium transition-colors shadow-lg shadow-purple-600/20"
         >
           Start Interview
         </button>

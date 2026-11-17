@@ -115,6 +115,7 @@ export function useAudioCapture(
 
   const audioContextRef = useRef<AudioContext | null>(null)
   const systemStreamRef = useRef<MediaStream | null>(null)
+  const micStreamRef = useRef<MediaStream | null>(null)
   const workletNodeRef = useRef<AudioWorkletNode | null>(null)
 
   const startCapture = useCallback(async (): Promise<boolean> => {
@@ -163,11 +164,36 @@ export function useAudioCapture(
 
       const systemSource = audioContext.createMediaStreamSource(systemStream)
 
-      // Route system audio to both channels of the merger so the worklet's
-      // mixed signal (ch0*0.5 + ch1*0.5) equals the original system level.
+      // The candidate's microphone is optional: without it the session still
+      // works, it just cannot hear what the candidate says.
+      let micStream: MediaStream | null = null
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            // Echo cancellation keeps the interviewer's voice, playing through
+            // the speakers, from being picked up again as the candidate
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        })
+        micStreamRef.current = micStream
+        console.log('[Audio] Microphone track:', micStream.getAudioTracks()[0]?.label)
+      } catch (err) {
+        console.warn('[Audio] Microphone not available, continuing with system audio only:', err)
+      }
+
       const merger = audioContext.createChannelMerger(2)
-      systemSource.connect(merger, 0, 0)
-      systemSource.connect(merger, 0, 1)
+      if (micStream) {
+        // Channel 0: microphone (candidate). Channel 1: system audio (interviewer).
+        audioContext.createMediaStreamSource(micStream).connect(merger, 0, 0)
+        systemSource.connect(merger, 0, 1)
+      } else {
+        // Route system audio to both channels of the merger so the worklet's
+        // mixed signal (ch0*0.5 + ch1*0.5) equals the original system level.
+        systemSource.connect(merger, 0, 0)
+        systemSource.connect(merger, 0, 1)
+      }
 
       const workletNode = new AudioWorkletNode(
         audioContext,
@@ -181,7 +207,9 @@ export function useAudioCapture(
           onAudioDataRef.current?.(msg.data)
           onAudioChunkRef?.current?.({
             data: msg.data,
-            speaker: 'interviewer',
+            // With a microphone the worklet says who is louder; without one
+            // everything heard is the interviewer.
+            speaker: micStream && msg.speaker === 'user' ? 'user' : 'interviewer',
             isSpeaking: msg.isSpeaking ?? true,
             silenceDurationMs: msg.silenceDurationMs ?? 0,
           })
@@ -204,12 +232,13 @@ export function useAudioCapture(
       // but keep VAD active at a low threshold for speech timing (turn detection).
       // The backend needs isSpeaking=false + silenceDurationMs>=1500 to trigger suggestions.
       workletNode.port.postMessage({ type: 'setSystemAudioMode', threshold: 0.001 })
+      workletNode.port.postMessage({ type: 'setMicConnected', enabled: !!micStream })
 
       systemStream.getAudioTracks()[0]?.addEventListener('ended', () => {
         stopCapture()
       })
 
-      console.log('[Audio] Pipeline connected: system audio → merger → worklet → destination')
+      console.log(`[Audio] Pipeline connected: ${micStream ? 'mic + ' : ''}system audio → merger → worklet → destination`)
       setIsCapturing(true)
       return true
     } catch (err) {
@@ -224,6 +253,8 @@ export function useAudioCapture(
 
   const stopCapture = useCallback(() => {
     systemStreamRef.current?.getTracks().forEach((track) => track.stop())
+    micStreamRef.current?.getTracks().forEach((track) => track.stop())
+    micStreamRef.current = null
     workletNodeRef.current?.disconnect()
     audioContextRef.current?.close()
 

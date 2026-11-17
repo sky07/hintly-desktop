@@ -85,6 +85,11 @@ class AudioMergerProcessor extends AudioWorkletProcessor {
         this.systemAudioMode = true
         this.vadThreshold = event.data.threshold || 0.001
         console.log('[AudioWorklet] System audio mode enabled — sending all audio, VAD threshold for timing:', this.vadThreshold)
+      } else if (event.data.type === 'setMicConnected') {
+        // Desktop: channel 0 carries the candidate's microphone, channel 1 the
+        // system audio. Without it, system audio is fed to both channels.
+        this.micConnected = !!event.data.enabled
+        console.log('[AudioWorklet] Microphone channel', this.micConnected ? 'connected' : 'not connected')
       }
     }
   }
@@ -278,14 +283,23 @@ class AudioMergerProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // Mix both inputs
+    // Mix both inputs. With a real microphone on channel 0, keep system audio
+    // at full level (as it was when it fed both channels) and add the mic on top.
     const mixed = new Float32Array(micInput.length)
-    for (let i = 0; i < micInput.length; i++) {
-      mixed[i] = micInput[i] * 0.5 + systemInput[i] * 0.5
+    if (this.micConnected) {
+      for (let i = 0; i < micInput.length; i++) {
+        mixed[i] = systemInput[i] + micInput[i] * 0.7
+      }
+    } else {
+      for (let i = 0; i < micInput.length; i++) {
+        mixed[i] = micInput[i] * 0.5 + systemInput[i] * 0.5
+      }
     }
 
-    // VAD detection — used for speech timing (turn detection) and chunked mode gating
-    const mixedLevel = this.calculateLevel(mixed)
+    // VAD detection — used for speech timing (turn detection) and chunked mode gating.
+    // With a microphone connected, time the interviewer's turns on system audio
+    // alone so the candidate's voice and room noise do not hide their silence.
+    const mixedLevel = this.micConnected ? systemLevel : this.calculateLevel(mixed)
     const speechDetected = mixedLevel > this.vadThreshold
 
     if (speechDetected) {

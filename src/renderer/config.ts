@@ -12,8 +12,8 @@ const USE_LOCAL_BACKEND = false
 const LOCAL_API_URL = 'http://localhost:8000'
 const LOCAL_WS_URL = 'ws://localhost:8000/ws'
 
-const PROD_API_URL = 'https://interviewassistant-backend-production.up.railway.app'
-const PROD_WS_URL = 'wss://interviewassistant-backend-production.up.railway.app/ws'
+const PROD_API_URL = 'https://hintly-backend-production.up.railway.app'
+const PROD_WS_URL = 'wss://hintly-backend-production.up.railway.app/ws'
 
 const envApiUrl =
   typeof process !== 'undefined' ? process.env?.REACT_APP_API_URL : undefined
